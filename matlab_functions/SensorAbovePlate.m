@@ -1,116 +1,86 @@
 classdef SensorAbovePlate < handle
     properties(Access=private)
-        z0
-        sensor_axis
-        sigma
-        mur
-        d
-
-        N
-        Ts
-
-        cache_z
-        cache_omega
-        cache_data
+        sensor
+        plate
+        impl
     end
 
     methods
-        function obj = SensorAbovePlateCart(z0, sensor_axis, sigma, mur, d, varargin)
-            assert(z0 > 0);
-            assert(norm(sensor_axis) > 0);
+        function obj = SensorAbovePlate(z0, sensor_axis, sigma, mur, d, varargin)
+            assert(z0 > 0)
+            assert(numel(sensor_axis) == 3)
+            assert(norm(sensor_axis) > 0)
             assert(sigma >= 0)
             assert(mur >= 1)
             assert(d > 0)
 
-            obj.z0 = z0;
-            obj.sensor_axis = sensor_axis / norm(sensor_axis);           
-            obj.sigma = sigma;
-            obj.mur = mur;
-            obj.d = d;
+            obj.sensor = struct('z0',z0, 'axis',sensor_axis/norm(sensor_axis));
+            obj.plate = struct('sigma',sigma, 'mur',mur, 'd',d);
             
             p = inputParser;
-            addParameter(p, 'TruncateWidth', 0.2);
-            addParameter(p, 'SummationTerms', 2000);
+            addParameter(p, 'TruncateWidth', 0.1);
+            addParameter(p, 'SummationTerms', 500);
             parse(p, varargin{:});
             
-            obj.N = floor(p.Results.SummationTerms / 2);
-            obj.Ts = p.Results.TruncateWidth / 2 / obj.N;
-            
-            obj.cache_z     = [];
-            obj.cache_omega = [];
-            obj.cache_data  = {};
+            N = floor(p.Results.SummationTerms / 2);
+            Ts = p.Results.TruncateWidth / 2 / N;
+            obj.impl = struct('N',N, 'Ts',Ts);            
+            obj.impl.cache = {};
         end
 
-        function [Ax,Ay] = A(obj, x,y,z, omega)
+        function [Ex,Ey] = E(obj, x,y,z, omega)
             z = unique(z);
             if length(z) ~= 1
                 error('z must be of same value')
             end
             
-            for idx = 1:length(obj.cache_z)
-                if obj.cache_z(idx) == z && obj.cache_omega(idx) == omega
-                    Ax = obj.cache_data{idx}.Ax(x,y);
-                    Ay = obj.cache_data{idx}.Ay(x,y);
+            for idx = 1:length(obj.impl.cache)
+                if obj.impl.cache{idx}.z == z && obj.impl.cache{idx}.omega == omega
+                    Ex = obj.impl.cache{idx}.Ex(x,y);
+                    Ey = obj.impl.cache{idx}.Ey(x,y);
                     return
                 end
-            end          
-            
-            Ts = obj.Ts;
-            N = obj.N;
-            ws = 2*pi / Ts;
+            end     
 
-            z0 = obj.z0;
-            sensor_axis = obj.sensor_axis;
-            sigma = obj.sigma;
-            mur = obj.mur;
-            d = obj.d;
+            z0    = obj.sensor.z0;
+            t     = obj.sensor.axis;
+            sigma = obj.plate.sigma;
+            mur   = obj.plate.mur;
+            d     = obj.plate.d;
+            Ts    = obj.impl.Ts;
+            N     = obj.impl.N;
+            ws    = 2*pi / Ts;
+            mu0   = 4*pi * 1e-7;
             
-            fftAx = zeros(2*N+1);
-            fftAy = zeros(2*N+1);
+            fftEx = zeros(2*N+1);
+            fftEy = zeros(2*N+1);
             for n = 1:2*N+1
             for m = 1:2*N+1
                 u = (n - 1 - N) * ws / (2*N+1);
                 v = (m - 1 - N) * ws / (2*N+1);
                 kappa = sqrt(u^2+v^2);
-                C = Cs(u,v,z0,sensor_axis,omega) * R(kappa, sigma,mur,d,omega,z);
-                fftAx(n,m) = C *  1j * v;
-                fftAy(n,m) = C * -1j * u;
+                C = mu0/2 * (u*t(1) + v*t(2) + 1j*kappa*t(3)) * exp(-kappa*z0) * R(kappa,sigma,mur,d,omega,z);
+                fftEx(n,m) = C * -v;
+                fftEy(n,m) = C *  u;
             end
             end
-            fftAx = ifftshift(fftAx);
-            fftAy = ifftshift(fftAy);
+            fftEx = ifftshift(fftEx);
+            fftEy = ifftshift(fftEy);
             
-            Ax = fft2(fftAx) / Ts^2;  Ax = fftshift(Ax);
-            Ay = fft2(fftAy) / Ts^2;  Ay = fftshift(Ay);
+            Ex = ifft2(fftEx) / Ts^2;  Ex = fftshift(Ex);
+            Ey = ifft2(fftEy) / Ts^2;  Ey = fftshift(Ey);
+            [xs,ys] = ndgrid((-N:N) * Ts, (-N:N) * Ts);        
             
-            [xs,ys] = ndgrid((-N:N) * Ts, (-N:N) * Ts);
+            cache.z     = z;
+            cache.omega = omega;            
+            cache.Ex    = griddedInterpolant(xs,ys,Ex);
+            cache.Ey    = griddedInterpolant(xs,ys,Ey);
+            obj.impl.cache{end+1} = cache;
             
-            obj.cache_z    (end+1) = z;
-            obj.cache_omega(end+1) = omega;
-            obj.cache_data {end+1} = struct;
-            
-            obj.cache_data{end}.Ax = griddedInterpolant(xs,ys,Ax);
-            obj.cache_data{end}.Ay = griddedInterpolant(xs,ys,Ay);
-            
-            Ax = obj.cache_data{end}.Ax(x,y);
-            Ay = obj.cache_data{end}.Ay(x,y);
-        end
-
-        function [Ex,Ey] = E(obj, x,y,z, omega)
-            [Ax,Ay] = A(obj, x,y,z, omega);
-            Ex = -1j * omega * Ax;
-            Ey = -1j * omega * Ay;
+            Ex = cache.Ex(x,y);
+            Ey = cache.Ey(x,y);
         end
     end
-end
-
-
-
-function val = Cs(u,v, z0, t, omega)
-mu0 = 4*pi * 1e-7;
-kappa = sqrt(u.^2 + v.^2);
-I = 1j / omega;
-val = mu0 * I * exp(-kappa*z0) * (1j * u * t(1) + 1j * v * t(2) - kappa * t(3)) / 2;
 end
 
 function val = R(kappa, sigma, mur, d, omega, z)
@@ -120,7 +90,16 @@ lambda = sqrt(kappa.^2 + 1j*omega * mu0*mur * sigma);
 c1 = lambda + kappa * mur;
 c2 = lambda - kappa * mur;
 
+div0 = c1 == 0 && c2 == 0;
+if div0
+    c1 = 1 + mur;
+    c2 = 1 - mur;
+end
+
 num = c1 .* exp(lambda * z) + c2 .* exp(-lambda * (z+2*d));
 den = c1.^2 - c2.^2 .* exp(-2*lambda*d);
-val = (2 * kappa * mur) .* num ./ den;
+val = 2 * mur .* num ./ den;
+if ~div0
+    val = val * kappa;
+end
 end
