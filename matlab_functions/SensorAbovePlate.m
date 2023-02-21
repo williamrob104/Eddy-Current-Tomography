@@ -29,18 +29,18 @@ classdef SensorAbovePlate < handle
         end
 
         function [Ex,Ey] = E(obj, x,y,z, omega)
-            z = unique(z);
-            if length(z) ~= 1
+            if range(z, 'all') > 1e-10
                 error('z must be of same value')
             end
+            z = mean(z, 'all');
             
             for idx = 1:length(obj.impl.cache)
-                if obj.impl.cache{idx}.z == z && obj.impl.cache{idx}.omega == omega
+                if abs(obj.impl.cache{idx}.z - z) < 1e-10 && obj.impl.cache{idx}.omega == omega
                     Ex = obj.impl.cache{idx}.Ex(x,y);
                     Ey = obj.impl.cache{idx}.Ey(x,y);
                     return
                 end
-            end     
+            end
 
             z0    = obj.sensor.z0;
             t     = obj.sensor.axis;
