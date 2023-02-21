@@ -23,53 +23,51 @@ classdef SensorAbovePlate < handle
             parse(p, varargin{:});
             
             N = floor(p.Results.SummationTerms / 2);
-            Ts = p.Results.TruncateWidth / 2 / N;
-            obj.impl = struct('N',N, 'Ts',Ts);            
+            delta_x = p.Results.TruncateWidth / 2 / N;
+            obj.impl = struct('N',N, 'delta_x',delta_x);            
             obj.impl.cache = {};
         end
 
         function [Ex,Ey] = E(obj, x,y,z, omega)
-            if range(z, 'all') > 1e-10
+            z = unique(z);
+            if numel(z) ~= 1
                 error('z must be of same value')
             end
-            z = mean(z, 'all');
-            
+
             for idx = 1:length(obj.impl.cache)
-                if abs(obj.impl.cache{idx}.z - z) < 1e-10 && obj.impl.cache{idx}.omega == omega
+                if obj.impl.cache{idx}.z == z && obj.impl.cache{idx}.omega == omega
                     Ex = obj.impl.cache{idx}.Ex(x,y);
                     Ey = obj.impl.cache{idx}.Ey(x,y);
                     return
                 end
             end
 
-            z0    = obj.sensor.z0;
-            t     = obj.sensor.axis;
-            sigma = obj.plate.sigma;
-            mur   = obj.plate.mur;
-            d     = obj.plate.d;
-            Ts    = obj.impl.Ts;
-            N     = obj.impl.N;
-            ws    = 2*pi / Ts;
-            mu0   = 4*pi * 1e-7;
-            
-            fftEx = zeros(2*N+1);
-            fftEy = zeros(2*N+1);
-            for n = 1:2*N+1
-            for m = 1:2*N+1
-                u = (n - 1 - N) * ws / (2*N+1);
-                v = (m - 1 - N) * ws / (2*N+1);
-                kappa = sqrt(u^2+v^2);
-                C = mu0/2 * (u*t(1) + v*t(2) + 1j*kappa*t(3)) * exp(-kappa*z0) * R(kappa,sigma,mur,d,omega,z);
-                fftEx(n,m) = C * -v;
-                fftEy(n,m) = C *  u;
-            end
-            end
+            z0      = obj.sensor.z0;
+            t       = obj.sensor.axis;
+            sigma   = obj.plate.sigma;
+            mur     = obj.plate.mur;
+            d       = obj.plate.d;
+            delta_x = obj.impl.delta_x;
+            N       = obj.impl.N;
+            delta_u = 2*pi / delta_x / (2*N+1);
+            mu0     = 4*pi * 1e-7;
+
+            [u,v] = ndgrid((-N:N) * delta_u, (-N:N) * delta_u);
+            kappa = sqrt(u.^2 + v.^2);
+
+            C = mu0/2 ./ kappa.^2 .* (u*t(1) + v*t(2) + 1j*kappa*t(3)) .* exp(-kappa*z0) .* R(kappa,sigma,mur,d,omega,z);
+            fftEx = C .* -v;
+            fftEy = C .*  u;
             fftEx = ifftshift(fftEx);
             fftEy = ifftshift(fftEy);
+
+            % TODO: deal with the case omega=0, kappa=0, fftEx(1,1) neq 0
+            fftEx(1,1) = 0;
+            fftEy(1,1) = 0;
             
-            Ex = ifft2(fftEx) / Ts^2;  Ex = fftshift(Ex);
-            Ey = ifft2(fftEy) / Ts^2;  Ey = fftshift(Ey);
-            [xs,ys] = ndgrid((-N:N) * Ts, (-N:N) * Ts);        
+            Ex = ifft2(fftEx) / delta_x^2;  Ex = fftshift(Ex);
+            Ey = ifft2(fftEy) / delta_x^2;  Ey = fftshift(Ey);
+            [xs,ys] = ndgrid((-N:N) * delta_x, (-N:N) * delta_x);        
             
             cache.z     = z;
             cache.omega = omega;            
@@ -90,16 +88,12 @@ lambda = sqrt(kappa.^2 + 1j*omega * mu0*mur * sigma);
 c1 = lambda + kappa * mur;
 c2 = lambda - kappa * mur;
 
-div0 = c1 == 0 && c2 == 0;
-if div0
-    c1 = 1 + mur;
-    c2 = 1 - mur;
-end
+mask = c1 == 0 & c2 == 0;
+c1(mask) = 1 + mur;
+c2(mask) = 1 - mur;
 
 num = c1 .* exp(lambda * z) + c2 .* exp(-lambda * (z+2*d));
 den = c1.^2 - c2.^2 .* exp(-2*lambda*d);
-val = 2 * mur .* num ./ den;
-if ~div0
-    val = val * kappa;
-end
+val = 2 * mur * num ./ den;
+val(~mask) = val(~mask) .* kappa(~mask);
 end
